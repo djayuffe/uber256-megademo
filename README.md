@@ -148,8 +148,17 @@ text-grep audits (`audit.py`, `audit_final.py`, `release_audit.py`) could not ca
 - `FINAL_REVIEW.md` mis-described the backbuffer allocation as "4000h paragraphs
   (64 KiB)"; the source actually requests decimal 4000 paragraphs, which is exactly
   64,000 bytes (not 65,536). Corrected.
+- `intro256.asm` had the same unguarded-keyboard-poll issue as `showcase.asm` above:
+  `in al,60h` with no 8042 status check and no IRQ1 masking, so the BIOS's own IRQ1
+  handler would almost always drain the scancode first, making Esc effectively
+  non-functional. Fixed the same way (status-register guard plus IRQ1 masking around
+  the loop, restored on exit) at a cost of 16 bytes — `UBER256.COM` is now 70 bytes,
+  still well inside the 256-byte budget.
+- A stale comment in `scene_marker` undercounted its own per-frame pixel stores
+  (claimed 384, actually 16 blocks * 8x8 = 1024). Corrected for accuracy; no
+  behavioral change.
 
-All three audit scripts and a full `./build.sh` now pass with NASM producing a 54-byte
+All three audit scripts and a full `./build.sh` now pass with NASM producing a 70-byte
 `UBER256.COM` and a working `UBERSHOW.COM`.
 
 ## Final release architecture

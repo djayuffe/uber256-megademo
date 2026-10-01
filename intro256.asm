@@ -9,6 +9,10 @@ start:
     int 10h
     push word 0A000h
     pop es
+    in al,21h
+    push ax                      ; save PIC mask (restored before exit)
+    or al,2                      ; mask IRQ1: our own 60h/64h poll owns Esc
+    out 21h,al
     xor bx,bx                    ; frame/phase
 
 frame:
@@ -31,10 +35,15 @@ frame:
     jnz .y
 
     inc bx
+    in al,64h                    ; 8042 status: wait for real scancode data
+    test al,1
+    jz frame
     in al,60h
     dec al                       ; Esc scancode 1 => zero
     jnz frame
 
+    pop ax
+    out 21h,al                   ; restore BIOS IRQ1 keyboard servicing
     mov ax,3
     int 10h
     ret

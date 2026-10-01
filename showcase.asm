@@ -572,7 +572,7 @@ raster_line:
 
 
 ; Scene identity strip: 16 small blocks at the top, current scene highlighted.
-; Deliberately tiny: 16*8*3 = 384 stores/frame.
+; Deliberately tiny: 16 blocks * 8x8 pixels = 1024 stores/frame.
 scene_marker:
     push ax
     push bx
