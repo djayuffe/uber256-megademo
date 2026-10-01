@@ -4,7 +4,7 @@ BITS 16
 ORG 100h
 
 %define SCENE_SHIFT 9             ; 512 frames/scene (~7.3 s at 70 Hz)
-%define SCENE_COUNT 17            ; 17 primary scenes (16 fields + 3D cube)
+%define SCENE_COUNT 18            ; 18 primary scenes (16 fields + cube + starfield)
 %define SCROLL_BASE_Y 182         ; bottom text-scroller baseline row
 %define SCROLL_BG 1                ; fixed black (see palette_tick reserved DAC entries)
 ; Scroller foreground cycles across fixed DAC indices 4..7 (a small rainbow,
@@ -14,6 +14,8 @@ ORG 100h
 %define CUBE_FG_DIM 3             ; fixed dim grey, far-edge wireframe colour
 %define CUBE_EYE_DIST 160         ; perspective-divide distance from the eye
 %define CUBE_PROJ_SCALE 110       ; perspective projection scale factor
+%define STAR_COUNT 32             ; stars in scene_starfield
+%define STAR_SCALE 20             ; starfield perspective projection scale
 
 start:
     ; A .COM program owns ALL free conventional memory at launch (its PSP
@@ -35,13 +37,23 @@ start:
     mov ah,0Fh
     int 10h
     mov [old_mode],al
-    mov ah,48h
-    mov bx,4000                   ; 64000 bytes
-    int 21h
-    jc nomem
-    mov [backseg],ax
     mov ax,13h
     int 10h
+    ; True hardware double buffering: widen the VGA CPU window from the
+    ; BIOS mode-13h default (64K @ A0000h) to 128K @ A0000h (Graphics
+    ; Controller Misc Register, Memory Map Select = 00), so segments A000h
+    ; and B000h both address real VGA memory -- two independent 64,000-byte
+    ; pages. Each frame renders entirely into the currently-hidden page,
+    ; then present: flips the CRTC start address to display it: a real
+    ; page flip, not a software backbuffer-to-A000h copy.
+    mov dx,3CEh
+    mov al,6
+    out dx,al
+    inc dx
+    in al,dx
+    and al,0F3h                   ; Memory Map Select = 00 (128K @ A0000h)
+    out dx,al
+    mov byte [vga_page],0         ; page we render into next (0=A000h,1=B000h)
     in al,21h
     mov [pic_mask],al
     or al,2                       ; mask IRQ1 so BIOS int 9 cannot race
@@ -51,7 +63,14 @@ start:
     call speaker_on
 
 main:
-    mov ax,[backseg]
+    mov al,[vga_page]              ; render into the currently-hidden page
+    cmp al,0
+    je .page0
+    mov ax,0B000h
+    jmp .haveseg
+.page0:
+    mov ax,0A000h
+.haveseg:
     mov es,ax
     xor di,di
     ; Scene index = (frame >> SCENE_SHIFT) mod SCENE_COUNT. SCENE_COUNT is not
@@ -98,6 +117,8 @@ main:
     je scene_vortex
     cmp al,15
     je scene_cube
+    cmp al,16
+    je scene_starfield
     jmp scene_finale
 
 ; 1: interference plasma - cheap arithmetic, continuously phase animated.
@@ -565,7 +586,84 @@ scene_cube:
     jb .ce_loop
     jmp overlay
 
-; 17: finale combines time, coordinates and coarse radial energy.
+; 17: 3D starfield. Each star has a genuine Z depth, computed fresh every
+; frame as a function of the frame clock and star index (no persistent
+; per-star state needed): Z counts down from far to near and wraps back to
+; far, so stars continuously stream toward the viewer. Perspective-divides
+; by Z exactly like scene_cube's projection, just for points instead of
+; wireframe edges, and brightens as a star gets closer.
+scene_starfield:
+    mov ax,CUBE_BG
+    mov ah,al
+    mov cx,32000
+    rep stosw
+
+    mov word [star_idx],0
+    xor si,si                      ; si = star index * 2 (word table offset)
+.st_loop:
+    mov ax,bp
+    mov cx,3
+    mul cx                         ; ax = (frame*3) mod 65536 -- truncation
+                                    ; just means one harmless seam every
+                                    ; 65536 frames (~15 min), never visible
+    mov cx,[star_idx]
+    imul cx,37                     ; stagger each star's phase
+    add ax,cx
+    xor dx,dx
+    mov cx,240
+    div cx                         ; dx = phase 0..239
+    mov ax,255
+    sub ax,dx                      ; ax = Z: 255 (far) down to 16 (near),
+    mov [star_z],ax                ; wraps back to far when phase resets
+
+    mov ax,[star_base_x+si]
+    mov cx,STAR_SCALE
+    imul ax,cx
+    cwd
+    idiv word [star_z]
+    add ax,160
+    mov [star_sx],ax
+
+    mov ax,[star_base_y+si]
+    mov cx,STAR_SCALE
+    imul ax,cx
+    cwd
+    idiv word [star_z]
+    add ax,100
+    mov [star_sy],ax
+
+    mov byte [star_color],CUBE_FG_DIM
+    mov ax,[star_z]
+    cmp ax,80
+    jg .plot
+    mov byte [star_color],CUBE_FG
+.plot:
+    mov ax,[star_sy]
+    cmp ax,0
+    jl .st_skip
+    cmp ax,199
+    jg .st_skip
+    mov bx,[star_sx]
+    cmp bx,0
+    jl .st_skip
+    cmp bx,319
+    jg .st_skip
+    mov cx,320
+    mul cx
+    add ax,bx
+    mov di,ax
+    mov al,[star_color]
+    stosb
+.st_skip:
+    add si,2
+    mov ax,[star_idx]
+    inc ax
+    mov [star_idx],ax
+    cmp ax,STAR_COUNT
+    jb .st_loop
+    jmp overlay
+
+; 18: finale combines time, coordinates and coarse radial energy.
 scene_finale:
     xor dx,dx
 .fy: xor cx,cx
@@ -622,16 +720,34 @@ overlay:
 present:
     call wait_vsync
     call palette_tick
-    push ds
-    mov ax,[backseg]
-    mov ds,ax
-    xor si,si
-    mov ax,0A000h
-    mov es,ax
-    xor di,di
-    mov cx,32000
-    rep movsw
-    pop ds
+    ; Flip: show the page we just finished rendering into (show_page),
+    ; and flip vga_page so next frame renders into the other, now-hidden
+    ; page. wait_vsync above already caught the start of retrace, so this
+    ; CRTC update lands inside vertical blank, same as the old blit did.
+    mov al,[vga_page]
+    mov [show_page],al
+    xor al,1
+    mov [vga_page],al
+    mov al,[show_page]
+    cmp al,0
+    je .show0
+    mov bx,4000h                  ; page1 (B000h) = byte offset 65536,
+    jmp .haveaddr                 ; /4 for chain-4 start-address units
+.show0:
+    xor bx,bx                     ; page0 (A000h) = byte offset 0
+.haveaddr:
+    mov dx,3D4h
+    mov al,0Ch
+    out dx,al
+    inc dx
+    mov al,bh
+    out dx,al
+    dec dx
+    mov al,0Dh
+    out dx,al
+    inc dx
+    mov al,bl
+    out dx,al
     inc bp
     call music_tick
     call key_escape
@@ -641,21 +757,10 @@ exit:
     call speaker_off
     mov al,[pic_mask]
     out 21h,al                    ; restore BIOS IRQ1 keyboard servicing
-    mov ax,[backseg]
-    mov es,ax
-    mov ah,49h
-    int 21h
     xor ah,ah
     mov al,[old_mode]
     int 10h
     mov ax,4C00h
-    int 21h
-
-nomem:
-    mov dx,msg_nomem
-    mov ah,9
-    int 21h
-    mov ax,4C01h
     int 21h
 
 ; AX = y. ES still points at backbuffer here. Draws a soft 3-scanline glow
@@ -1242,14 +1347,15 @@ speaker_off:
     out 61h,al
     ret
 
-; 16-step A-minor-pentatonic arpeggio with rests, update every 8 frames
-; (~8.75 Hz at VGA 70 Hz). A 0 entry in `notes` is a rest: the speaker is
-; muted rather than reprogrammed, so the pattern has actual rhythm instead
-; of one continuous drone. Transposed by show act (cur_scene/8, the same
-; shared value main: already computed) by HALVING the PIT divisor per
-; octave rather than a raw subtraction -- divisor halving is always exactly
-; one octave regardless of the starting note, so every transposed step
-; stays in tune instead of drifting by an inconsistent interval.
+; 32-step A-minor-pentatonic phrase (a 16-step call, then a complementary
+; 16-step response) with rests, update every 8 frames (~8.75 Hz at VGA
+; 70 Hz). A 0 entry in `notes` is a rest: the speaker is muted rather than
+; reprogrammed, so the pattern has actual rhythm instead of one continuous
+; drone. Transposed by show act (cur_scene/8, the same shared value main:
+; already computed) by HALVING the PIT divisor per octave rather than a
+; raw subtraction -- divisor halving is always exactly one octave
+; regardless of the starting note, so every transposed step stays in tune
+; instead of drifting by an inconsistent interval.
 music_tick:
     ; Two frames before each new step, mute briefly: a short, clean silence
     ; before the next retrigger reads as a real note attack instead of the
@@ -1265,7 +1371,7 @@ music_tick:
     test al,7
     jnz .done
     shr ax,3
-    and ax,15
+    and ax,31
     shl ax,1
     mov si,ax
     mov ax,[notes+si]
@@ -1291,14 +1397,19 @@ music_tick:
     out 42h,al
 .done: ret
 
-; A-minor pentatonic, PIT divisors for A3,C4,D4,E4,G4,A4,C5,D5,E5,G5 (0=rest)
+; A-minor pentatonic, PIT divisors for A3,C4,D4,E4,G4,A4,C5,D5,E5,G5 (0=rest).
+; First 16 steps are the "call" phrase, last 16 a complementary descending
+; "response" that resolves back onto A4 so the 32-step loop feels like one
+; phrase instead of two independent halves stitched together.
 notes dw 2712,2280,1810,0,2032,2280,2712,0
       dw 3044,2712,2280,2032,1810,0,2280,1522
+      dw 1522,1810,2032,0,2280,2032,1810,0
+      dw 3044,1810,2280,2712,3044,0,2280,2712
 old_mode db 3
-backseg dw 0
+vga_page db 0                     ; which page we render into next
+show_page db 0                    ; which page present: just flipped to
 pal_limit db 63
 pic_mask db 0
-msg_nomem db 'UBERSHOW: not enough conventional memory.$'
 cur_scene db 0                    ; scene index main: computed this frame,
                                    ; shared with scene_marker/music_tick so
                                    ; they can't drift out of sync with it
@@ -1328,6 +1439,17 @@ cube_depth dw 0
 proj_x times 8 dw 0
 proj_y times 8 dw 0
 proj_z times 8 dw 0
+
+; --- 3D starfield scene state ---
+star_idx dw 0
+star_z dw 0
+star_sx dw 0
+star_sy dw 0
+star_color db 0
+star_base_x dw -93,-10,-36,-98,129,66,-135,-39,108,-137,-49,129,-38,-8,-69,66
+            dw -8,-40,-98,44,33,-15,85,-87,-110,0,35,-52,-115,-34,-110,-99
+star_base_y dw -89,-33,-60,78,-73,-87,-72,-36,59,48,88,12,19,-94,83,-8
+            dw -56,-9,-72,-71,-7,-84,42,1,46,65,52,85,-84,-21,-36,2
 
 cube_verts: dw -40,-40,-40
             dw  40,-40,-40

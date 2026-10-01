@@ -10,7 +10,7 @@ glyph, note and 3D vertex is generated procedurally by the code itself.
 | File | Purpose | Size | CPU | Video |
 |---|---|---|---|---|
 | `intro256.asm` | strict ≤256-byte sizecoded intro | 70 bytes | 386+ | VGA mode 13h |
-| `showcase.asm` | full multi-scene production demo | ~3.6 KB | 386+ | VGA mode 13h |
+| `showcase.asm` | full multi-scene production demo | ~3.9 KB | 386+ | VGA mode 13h |
 
 ## Quick start
 
@@ -29,8 +29,7 @@ it isn't symlinked onto `PATH`).
 A single continuous demo, driven by one 16-bit frame counter that never resets, so
 visuals, palette, music and overlays all stay phase-locked to each other.
 
-**17 scenes**, ~7.3 real seconds each at the emulated monitor's 70 Hz, grouped into
-four conceptual acts:
+**18 scenes**, ~7.3 real seconds each at the emulated monitor's 70 Hz:
 
 | # | Scene | Technique |
 |---|---|---|
@@ -49,18 +48,20 @@ four conceptual acts:
 | 13 | Scanwave / CRT bands | odd/even scanline shift |
 | 14 | Bitplane interference | AND-masked digital look |
 | 15 | Vortex mixer | signed-coordinate XOR, no division |
-| 16 | **Rotating wireframe cube** | real 3D: see below |
-| 17 | Finale | combines time, coordinates and radial energy |
+| 16 | **Rotating wireframe cube** | real 3D, perspective: see below |
+| 17 | **3D starfield** | real 3D, perspective: see below |
+| 18 | Finale | combines time, coordinates and radial energy |
 
-Scenes 1–15 and 17 are full-screen procedural fields: a `STOSB` loop touches all
+Scenes 1–15 and 18 are full-screen procedural fields: a `STOSB` loop touches all
 64,000 pixels every frame from cheap integer recurrences (XOR, shifts, the
-occasional `IMUL`) — no lookup tables, no asset data. Scene 16 is architecturally
-different (see below) and is the only one that doesn't fit that renderer contract.
+occasional `IMUL`) — no lookup tables, no asset data. Scenes 16–17 are
+architecturally different (see below) and are the only ones that don't fit that
+renderer contract.
 
 On top of every scene:
 - **Three soft-glow raster bars**, phase-locked to the frame clock, each a
   dim/bright/dim triple scanline rather than one flat line.
-- **A 17-block scene-progress marker** in the top-left corner.
+- **An 18-block scene-progress marker** in the top-left corner.
 - **A palette-domain fade** in/out around every scene boundary (hides the hard cut).
 - **A symmetric shutter transition** (black bars closing/opening) layered on top.
 - **A colour-cycling sine-wave text scroller** along the bottom (see below).
@@ -77,6 +78,17 @@ bright white, the two farther ones dim grey, for basic hidden-depth cueing witho
 real hidden-line removal. All of it — rotation, projection, line draw — is 16-bit
 fixed-point integer math; no FPU, no floating point.
 
+### 3D starfield (scene 17)
+
+A field of 32 stars, each with a genuine Z depth streaming toward the viewer and
+perspective-projected exactly like the cube's vertices (divide by distance, not
+orthographic). Every star's position is computed fresh each frame purely as a
+function of the frame clock and its own index — no persistent per-star state to
+track: Z counts down from far to near and wraps back to far on its own, so stars
+continuously fly past and recycle forever without ever needing to be "respawned"
+by special-case code. Closer stars render bright white, farther ones dim grey,
+the same depth-cueing idea as the cube's edges.
+
 ### Sine-wave text scroller
 
 A from-scratch 5×7 bitmap font (29 glyphs: the letters/digits/punctuation the
@@ -91,11 +103,13 @@ regardless of what the main per-scene palette animation is doing elsewhere — s
 
 ### Music
 
-A 16-step A-minor-pentatonic arpeggio on the PC speaker (PIT channel 2), with real
-rests (not just a continuous drone) and a short staccato mute before each retrigger
-for a clean note attack. Transposition across the show's three acts is done by
-**halving the PIT divisor** (exactly one octave per step) rather than a raw
-arithmetic offset, so every transposed note stays in tune regardless of its
+A 32-step A-minor-pentatonic phrase on the PC speaker (PIT channel 2) — a 16-step
+"call" followed by a complementary 16-step descending "response" that resolves
+back onto the tonic, rather than one 16-step pattern looping identically forever.
+Real rests (not a continuous drone) and a short staccato mute before each
+retrigger give clean note attacks. Transposition across the show's three acts is
+done by **halving the PIT divisor** (exactly one octave per step) rather than a
+raw arithmetic offset, so every transposed note stays in tune regardless of its
 starting pitch.
 
 ### Fixed vs. animated palette
@@ -132,14 +146,27 @@ the BIOS's own interrupt handler races the direct port poll and wins almost ever
 time (see "Known issues this audit found and fixed" below). PC speaker output goes
 through port `61h` (gate) and PIT channel 2 (ports `42h`/`43h`).
 
-### A DOS `.COM` memory-model gotcha
+### True hardware double buffering (VGA page flip)
 
-A `.COM` program owns *all* free conventional memory at launch by default (its PSP
-block spans to the top of the DOS arena). `UBERSHOW.COM` needs a 64,000-byte
-backbuffer, allocated via `INT 21h AH=48h` — which will always fail with
-"insufficient memory" unless the program first **shrinks its own memory block**
-(`AH=4Ah`, SETBLOCK) to free some up. `start:` does this immediately, before
-anything else, and switches onto a small local stack inside the block it keeps.
+`UBERSHOW.COM` does not render into a system-RAM backbuffer and copy it to VRAM
+every frame. Instead, right after setting mode 13h it reprograms the Graphics
+Controller's Miscellaneous Register (port `3CEh` index 6) to widen the VGA CPU
+window from the BIOS's default 64K at `A0000h` to a full 128K at `A0000h`
+(Memory Map Select = 00) — which makes segments `A000h` *and* `B000h` both
+address real VGA memory, giving two independent 64,000-byte pages inside actual
+video RAM. Each frame renders entirely into whichever page isn't currently
+displayed, then `present:` flips the CRTC start-address register (port `3D4h`
+indices `0Ch`/`0Dh`, in chain-4 units of 4 bytes) to display it — a genuine
+hardware page flip, not a blit. This removes the need for any DOS conventional-
+memory backbuffer allocation entirely.
+
+A `.COM` program still owns *all* free conventional memory at launch by default
+(its PSP block spans to the top of the DOS arena), which matters here because the
+program's own font/scroller/cube tables and small stack need conventional memory
+to live in — `start:` **shrinks its own memory block** (`AH=4Ah`, SETBLOCK) to
+8 KiB immediately, before anything else, and switches onto a small local stack
+inside the block it keeps. (It did need this shrink for a 64,000-byte backbuffer
+allocation too, before the page-flip rewrite — see "Known issues" below.)
 
 ## Timing: vsync pacing vs. DOSBox's `cycles` setting
 
@@ -168,11 +195,11 @@ Three layered static checks, run as part of `./build.sh`:
   framebuffer usage, rejects accidental x86-64-only register names (`sil`/`dil`/
   etc., illegal in 16-bit real mode — this class of bug did slip through once, see
   below).
-- **`audit_final.py`** — per-scene invariants: all 17 scenes present, each one
+- **`audit_final.py`** — per-scene invariants: all 18 scenes present, each one
   either does a full 320×200 `STOSB` sweep ending in `jmp overlay`, or (for
-  `scene_cube`) clears via `rep stosw` and calls `draw_line`; checks the DAC/input/
-  cleanup invariants and that every scene actually hands off to `overlay` instead of
-  falling through into the next one.
+  `scene_cube`/`scene_starfield`) clears via `rep stosw` and projects/draws with
+  perspective math instead; checks the DAC/input/cleanup invariants and that every
+  scene actually hands off to `overlay` instead of falling through into the next.
 - **`release_audit.py`** — whole-tree release gate: every file present, every scene
   label appears exactly once, memory/VGA/palette/input/audio invariants, the strict
   256-byte build gate.
@@ -231,3 +258,21 @@ several bugs the static/text-grep audits could not catch on their own:
 All three audit scripts and a full `./build.sh` pass; both `.COM` files have been
 built with real NASM and run live in DOSBox, confirmed rendering, animating, and
 exiting cleanly on Esc.
+
+## Later additions
+
+- **True VGA hardware double buffering**, replacing the original system-RAM
+  backbuffer + `REP MOVSW` copy with a real CRTC page flip (see above) — removes
+  the DOS conventional-memory backbuffer allocation entirely. Verified live in
+  DOSBox and with an extended headless run showing no crash.
+- **Scene 17: a 3D starfield** with genuine perspective-projected depth, using
+  the same math as the cube.
+- **Music extended to a 32-step call-and-response phrase** instead of a 16-step
+  loop.
+- `run-dosbox.sh` was found to be **silently running at a throttled ~3000 cycles**
+  instead of `cycles=max`: combining `-conf` with separate `-c` autoexec flags on
+  the command line defeats DOSBox's max-cycles detection in this build. Fixed by
+  folding the autoexec commands into the conf file's own `[autoexec]` section and
+  launching with `-conf` alone (confirmed live: title bar reads "max 100%
+  cycles"). It also didn't fall back to the Homebrew cask's `.app` bundle when
+  `dosbox` wasn't on `PATH` — fixed.
