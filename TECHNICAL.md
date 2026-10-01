@@ -38,4 +38,44 @@ Rendering loads ES with the allocated backbuffer segment once at frame start. In
 
 ## Presentation choreography
 
-Version 5.0 combines two transition mechanisms. `palette_tick` performs the inexpensive DAC-domain fade, while `transition_wipe` covers symmetric top/bottom scanline regions during the first and last 16 frames of each 512-frame scene. `scene_marker` renders sixteen tiny progress blocks directly into the backbuffer. Both overlays execute after the scene renderer and before the retrace/presentation path, so they cannot leave stale pixels between scenes.
+Version 5.0 combines two transition mechanisms. `palette_tick` performs the inexpensive DAC-domain fade, while `transition_wipe` covers symmetric top/bottom scanline regions during the first and last 16 frames of each 512-frame scene. `scene_marker` renders seventeen tiny progress blocks directly into the backbuffer. `scroll_draw` runs last of the overlays, after `transition_wipe`, so the bottom scroller is never covered by the scene-cut shutter bars. All four overlays execute after the scene renderer and before the retrace/presentation path, so they cannot leave stale pixels between scenes.
+
+## Perspective projection (scene_cube)
+
+Unlike the field scenes, `scene_cube` needs genuine 3D math. Two rotations (Y axis,
+then X axis) are applied per vertex using one shared 256-entry sine table; cosine
+is read from the same table at a 64-step (quarter-turn) offset rather than keeping
+a second table. Each rotation stage is a standard 2D rotation matrix in fixed point:
+multiply by the sine/cosine byte (range -63..63), sum, then `SAR` by 6 to undo the
+implicit x64 scale. Products stay well within a signed 16-bit range throughout,
+since a rotation can't increase a vector's magnitude beyond its original length.
+
+Projection is a true perspective divide, not orthographic: `screen = centre +
+(rotated * SCALE) / (depth + EYE_DIST)`, using `CWD`/`IDIV` for the signed 16-bit
+division. `EYE_DIST=160` keeps the divisor comfortably positive (vertices stay
+within roughly +-70 along any axis after rotation, so depth+160 never approaches
+zero) regardless of the current rotation angle. Each vertex's post-rotation depth
+is also cached (`proj_z`) so each of the 12 edges can pick a bright-vs-dim colour
+from the average depth of its two endpoints, giving simple depth cueing without
+implementing real hidden-line removal.
+
+Edges are drawn with a from-scratch Bresenham line routine (the `dx+dy` err-term
+variant), operating entirely through memory-resident state rather than registers,
+since the routine has more live values (current x/y, both deltas, both step
+signs, the error term) than the six general-purpose 16-bit registers can hold at
+once without juggling. It bounds-checks every pixel before plotting, so an
+out-of-range projected point can never corrupt memory outside the backbuffer --
+a deliberate defensive measure after the `scene_feedback` backbuffer-overrun bug
+found during this project's audit.
+
+## Reserved DAC indices
+
+`palette_tick`'s main loop animates all 256 DAC entries from one continuous
+formula every frame, which looks good for the procedural fields but gives no
+index a guaranteed-stable colour. Indices 1-7 are overridden immediately after
+that loop runs, every frame, to fixed values: 1=black, 2=white, 3=dim grey, and
+4-7 a small fixed rainbow. The text scroller and scene_cube's wireframe use only
+these reserved indices, so they stay legible regardless of what the animated
+palette is doing elsewhere. This was added after visually confirming in DOSBox
+that the scroller/cube, when using plain animated indices, could lose contrast
+whenever the animation happened to converge those indices to similar tones.

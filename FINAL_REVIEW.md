@@ -99,3 +99,35 @@ kept `UBERSHOW.COM` from ever getting past "not enough conventional memory" even
 once it did assemble. Static audits remain useful as a fast regression gate, but
 they are not a substitute for an actual build-and-run pass, which should be repeated
 whenever `showcase.asm` or `intro256.asm` change.
+
+## 6.0 expansion: scene 16 (3D), text scroller, music, raster glow
+
+The showcase grew a 17th scene and a persistent bottom overlay:
+
+- **scene_cube** breaks the established "every scene is a full-field STOSB sweep"
+  contract on purpose: it's a real 3D vector object (two-axis rotation, true
+  perspective projection with a distance divide, a from-scratch Bresenham line
+  draw), not another procedural per-pixel field. It clears the backbuffer with
+  `rep stosw` instead, and `audit_final.py` was extended with a scene-specific
+  check for that shape rather than relaxing the general per-scene invariant.
+- A 5x7 bitmap-font **sine-wave text scroller** runs along the bottom every frame,
+  reusing the cube's sine table for its wave and glyph columns for a classic wavy
+  look, with a small fixed rainbow foreground that cycles along the message and
+  over time.
+- **DAC indices 1-7 are now reserved** immediately after `palette_tick`'s main
+  animated loop, overriding whatever it just assigned those indices, so the
+  scroller and cube stay legibly high-contrast regardless of the current
+  per-scene animated palette. Before this fix the scroller/cube used indices that
+  were *also* written by the animated loop and could converge to near-identical
+  tones -- confirmed visually (and then fixed) by actually running the showcase
+  in DOSBox, not by static review.
+- Raster bars changed from one flat scanline to a dim/bright/dim three-line glow.
+- Music: replaced an ad hoc note table and linear-subtraction transposition with
+  an explicit A-minor-pentatonic scale, real rests, a short pre-retrigger mute for
+  staccato note attacks, and octave-consistent transposition (halving the PIT
+  divisor, which is always exactly one octave regardless of starting pitch, unlike
+  the previous raw subtraction).
+
+`UBERSHOW.COM` grew from 1523 bytes (first audited build) to roughly 3.6 KB; the
+SETBLOCK memory shrink in `start:` was widened from 256 to 512 paragraphs (8 KiB)
+to keep comfortable headroom for the added font/scroller/cube tables.

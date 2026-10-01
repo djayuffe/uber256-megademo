@@ -1,177 +1,233 @@
-# UBER256 / UBERSHOW — authentic DOS VGA demo project
+# UBER256 / UBERSHOW — a zero-asset DOS VGA demoscene project
 
-A zero-asset real-mode PC demoscene project intended for DOSBox and real VGA-compatible DOS PCs.
+![UBERSHOW running in DOSBox](screenshot.jpg)
 
-## Targets
+Two flat real-mode DOS `.COM` programs, hand-written in NASM assembly, that run on
+DOSBox or real VGA-compatible DOS hardware. There are no image files, no fonts loaded
+from disk, no music samples, no libraries, and no protected-mode extender — every pixel,
+glyph, note and 3D vertex is generated procedurally by the code itself.
 
-| File | Purpose | CPU | Video |
-|---|---|---|---|
-| `intro256.asm` | strict <=256-byte intro | 386+ | VGA mode 13h |
-| `showcase.asm` | multi-scene procedural demo | 386+ | VGA mode 13h |
+| File | Purpose | Size | CPU | Video |
+|---|---|---|---|---|
+| `intro256.asm` | strict ≤256-byte sizecoded intro | 70 bytes | 386+ | VGA mode 13h |
+| `showcase.asm` | full multi-scene production demo | ~3.6 KB | 386+ | VGA mode 13h |
 
-Both are flat DOS `.COM` programs (`BITS 16`, `ORG 100h`). Graphics are generated directly into segment `A000h`; there are no images, fonts, libraries, runtime files, or protected-mode extenders.
-
-## Build
-
-Install NASM, then run:
-
-```sh
-./build.sh
-```
-
-The build performs a static source audit, assembles both programs, rejects `UBER256.COM` if it is over 256 bytes, and emits SHA-256 hashes. No padding is used to fake the 256-byte class: the executable must be **at most** 256 bytes.
-
-## Run in DOSBox
+## Quick start
 
 ```sh
-./run-dosbox.sh
+./build.sh        # assemble both .COM files with NASM, run the audits
+./run-dosbox.sh   # run UBERSHOW.COM in DOSBox (pass UBER256.COM for the intro)
 ```
 
-Or manually mount this directory in DOSBox and execute `UBER256.COM` or `UBERSHOW.COM`. Press **Esc** to return to DOS.
+Press **Esc** to exit cleanly back to DOS. Requires [NASM](https://www.nasm.us/) and
+[DOSBox](https://www.dosbox.com/) on your `PATH` (on macOS, `brew install nasm` and
+`brew install --cask dosbox` — the launcher also finds `dosbox.app` automatically if
+it isn't symlinked onto `PATH`).
+
+## `UBERSHOW.COM` — the showcase
+
+A single continuous demo, driven by one 16-bit frame counter that never resets, so
+visuals, palette, music and overlays all stay phase-locked to each other.
+
+**17 scenes**, ~7.3 real seconds each at the emulated monitor's 70 Hz, grouped into
+four conceptual acts:
+
+| # | Scene | Technique |
+|---|---|---|
+| 1 | Interference plasma | affine X/Y waves folded through XOR |
+| 2 | Radial tunnel | squared centered coordinates, no perspective divide |
+| 3 | XOR multiplier field | `x*y` dense nonlinear lattice |
+| 4 | Concentric moire | squared radial distance rings |
+| 5 | Zooming checker grid | no multiply in the inner loop |
+| 6 | Dual-source ripples | Manhattan-distance interference |
+| 7 | Twisting vertical ribbons | per-scanline phase shift |
+| 8 | Cellular/feedback field | deterministic, no prior-frame dependency |
+| 9 | Copper-wave bands | cheap scanline recurrence |
+| 10 | Expanding diamond rings | Manhattan distance, no multiply |
+| 11 | Animated lattice | diagonal XOR interference |
+| 12 | Horizontal warp bands | sign-extended phase offset |
+| 13 | Scanwave / CRT bands | odd/even scanline shift |
+| 14 | Bitplane interference | AND-masked digital look |
+| 15 | Vortex mixer | signed-coordinate XOR, no division |
+| 16 | **Rotating wireframe cube** | real 3D: see below |
+| 17 | Finale | combines time, coordinates and radial energy |
+
+Scenes 1–15 and 17 are full-screen procedural fields: a `STOSB` loop touches all
+64,000 pixels every frame from cheap integer recurrences (XOR, shifts, the
+occasional `IMUL`) — no lookup tables, no asset data. Scene 16 is architecturally
+different (see below) and is the only one that doesn't fit that renderer contract.
+
+On top of every scene:
+- **Three soft-glow raster bars**, phase-locked to the frame clock, each a
+  dim/bright/dim triple scanline rather than one flat line.
+- **A 17-block scene-progress marker** in the top-left corner.
+- **A palette-domain fade** in/out around every scene boundary (hides the hard cut).
+- **A symmetric shutter transition** (black bars closing/opening) layered on top.
+- **A colour-cycling sine-wave text scroller** along the bottom (see below).
+
+### Rotating 3D wireframe cube (scene 16)
+
+The one non-procedural-field scene: it clears the backbuffer to a flat colour, then
+does real 3D — two-axis rotation (Y then X) of 8 vertices using a shared 256-entry
+sine table (`cos(a) = sin(a+64)`, a quarter-turn lookup, so one table serves both),
+a **true perspective projection** (divide by distance from the eye, not orthographic
+— nearer faces are visibly larger), and draws the 12 edges with a from-scratch
+Bresenham line routine. Edges are depth-cued: the two nearer edges per face render
+bright white, the two farther ones dim grey, for basic hidden-depth cueing without
+real hidden-line removal. All of it — rotation, projection, line draw — is 16-bit
+fixed-point integer math; no FPU, no floating point.
+
+### Sine-wave text scroller
+
+A from-scratch 5×7 bitmap font (29 glyphs: the letters/digits/punctuation the
+scroller message actually uses) rendered column-by-column along the bottom 8
+scanlines, with each column's vertical position offset by the same sine table the
+cube uses, for the classic wavy-scroller look. The foreground colour cycles through
+a small fixed rainbow (red/yellow/green/cyan) both along the message and over time,
+so it doesn't just sit as flat white. Two DAC indices are reserved as fixed pure
+black/white (and four more for the rainbow) so the scroller and cube stay legible
+regardless of what the main per-scene palette animation is doing elsewhere — see
+"Fixed vs. animated palette" below.
+
+### Music
+
+A 16-step A-minor-pentatonic arpeggio on the PC speaker (PIT channel 2), with real
+rests (not just a continuous drone) and a short staccato mute before each retrigger
+for a clean note attack. Transposition across the show's three acts is done by
+**halving the PIT divisor** (exactly one octave per step) rather than a raw
+arithmetic offset, so every transposed note stays in tune regardless of its
+starting pitch.
+
+### Fixed vs. animated palette
+
+`palette_tick` drives one continuous animated formula across all 256 DAC entries
+every frame — which looks great for the procedural fields, but means no single
+index is guaranteed to stay a consistent colour from frame to frame. The scroller
+and cube need reliable contrast, so DAC indices **1–7 are reserved** immediately
+after the main animated loop runs each frame, overriding whatever it assigned them:
+1=black, 2=white, 3=dim grey (cube depth cue), 4–7=a small fixed rainbow (scroller).
+
+## `UBER256.COM` — the strict intro
+
+A classic sizecoded 256-byte intro: almost the entire program is one pixel
+recurrence (XOR, add, multiply, shift) over `X`, `Y` and a frame counter, written
+directly with `STOSB` — no asset data, no clearing pass, BIOS/DOS used only for mode
+entry/exit. Coordinates double as loop counters; register reuse and arithmetic
+overflow are the texture generator, not bugs. Comes in at 70 bytes, with the
+remaining ~186 bytes of the 256-byte budget unused.
 
 ## Hardware model
 
-BIOS `INT 10h`, AX=0013h selects 320x200, 256-colour VGA. One byte represents one pixel, giving a 64,000-byte visible framebuffer at `A000:0000`. Because 64,000 < 65,536, the complete frame fits in one real-mode segment and a linear `STOSB` renderer can traverse it without bank switching.
+BIOS `INT 10h` AX=0013h selects 320×200, 256-colour VGA (mode 13h): one byte per
+pixel, a 64,000-byte framebuffer at `A000:0000`. Since 64,000 < 65,536, the whole
+frame fits in one real-mode segment and a linear `STOSB` can traverse it without
+bank switching — `offset = y*320 + x`, and a full-frame renderer doesn't even need
+the multiply if it just starts `DI=0` and does 64,000 sequential stores.
 
-The showcase programs the VGA DAC through ports `3C8h/3C9h`. VGA DAC components are six-bit values (0..63). Port `3DAh` is sampled for vertical-retrace bit 3, providing a simple hardware-paced presentation point. Keyboard scan codes are sampled from controller data port `60h`; Esc make code `01h` terminates the demo.
+The showcase programs the VGA DAC through ports `3C8h`/`3C9h` (six-bit R/G/B per
+entry), polls port `3DAh` bit 3 for vertical retrace as a frame-pacing boundary, and
+reads the 8042 keyboard controller directly (status port `64h`, data port `60h`) for
+Esc — with IRQ1 masked at the 8259 PIC for the program's duration, since otherwise
+the BIOS's own interrupt handler races the direct port poll and wins almost every
+time (see "Known issues this audit found and fixed" below). PC speaker output goes
+through port `61h` (gate) and PIT channel 2 (ports `42h`/`43h`).
 
-## Strict intro
+### A DOS `.COM` memory-model gotcha
 
-`intro256.asm` deliberately spends almost all complexity on the inner pixel recurrence. For each frame it combines X, Y and a frame phase using XOR, addition and multiplication. Overflow is intentional: wrapping integer arithmetic is itself the texture generator. The low byte becomes the palette index and is written with `STOSB`.
+A `.COM` program owns *all* free conventional memory at launch by default (its PSP
+block spans to the top of the DOS arena). `UBERSHOW.COM` needs a 64,000-byte
+backbuffer, allocated via `INT 21h AH=48h` — which will always fail with
+"insufficient memory" unless the program first **shrinks its own memory block**
+(`AH=4Ah`, SETBLOCK) to free some up. `start:` does this immediately, before
+anything else, and switches onto a small local stack inside the block it keeps.
 
-This is characteristic sizecoding: coordinates double as loop counters, phase lives in a general register, there is no asset data, no clearing pass, and BIOS/DOS are only used for mode entry/exit.
+## Timing: vsync pacing vs. DOSBox's `cycles` setting
 
-## Showcase timeline
+The showcase paces itself correctly in software regardless of host speed: every
+frame polls the real VGA retrace bit via `wait_vsync` before presenting, capping
+display rate at the emulated monitor's ~70 Hz. `DOSBOX.CONF` ships with
+`cycles=max` / `core=auto` — this does **not** defeat that pacing; it just lets the
+CPU render each frame's effect as fast as the host allows and then wait at the
+retrace poll, same as the host-fast-forward-then-wait behavior of any other DOSBox
+program. A fixed lower cycle count only risks the renderer not finishing before the
+next retrace (visibly stuttery), for no benefit — and in testing, a mid-range fixed
+value was observed getting silently throttled further by DOSBox's own
+auto-adjustment under host load anyway.
 
-`UBERSHOW.COM` derives its scene number from bits of the global frame counter and automatically cycles through four renderers:
+`run-dosbox.sh` builds a temporary conf from `DOSBOX.CONF` with the actual
+mount/run commands folded into its own `[autoexec]` section before launching with
+`-conf` alone: combining `-conf` with separate command-line `-c` autoexec flags was
+found (in this testing) to silently cap `cycles=max` at a low fixed value instead of
+running full speed, so the launcher avoids that combination entirely.
 
-1. **Interference plasma** — affine X/Y waves folded through XOR.
-2. **Pseudo tunnel** — Manhattan radial distance plus a phase-shifted angular-like field.
-3. **XOR multiplier field** — `x*y` creates dense nonlinear lattices.
-4. **Moire/radial field** — squared centered coordinates create expanding rings and interference.
+## Source audits
 
-Every scene is procedural and renders the full 320x200 surface. The global frame counter changes both scene selection and texture phase, while the DAC palette maps byte-valued fields to visible colour.
+Three layered static checks, run as part of `./build.sh`:
 
-## Why mode 13h
+- **`audit.py`** — structural sanity: COM origin/mode declarations, VGA entry,
+  framebuffer usage, rejects accidental x86-64-only register names (`sil`/`dil`/
+  etc., illegal in 16-bit real mode — this class of bug did slip through once, see
+  below).
+- **`audit_final.py`** — per-scene invariants: all 17 scenes present, each one
+  either does a full 320×200 `STOSB` sweep ending in `jmp overlay`, or (for
+  `scene_cube`) clears via `rep stosw` and calls `draw_line`; checks the DAC/input/
+  cleanup invariants and that every scene actually hands off to `overlay` instead of
+  falling through into the next one.
+- **`release_audit.py`** — whole-tree release gate: every file present, every scene
+  label appears exactly once, memory/VGA/palette/input/audio invariants, the strict
+  256-byte build gate.
 
-The address of a pixel is simply:
-
-```
-offset = y * 320 + x
-```
-
-For a complete sequential renderer we do not even need that multiplication: start `DI=0` and execute 64,000 stores. This makes mode 13h unusually useful for tiny intros despite its modest resolution.
-
-## Timing and authenticity
-
-This is intentionally not a modern SDL program disguised as DOS. Rendering is 16-bit real-mode code and talks directly to VGA and keyboard I/O. Vertical retrace is used as a presentation boundary, but rendering speed still depends on emulated/real CPU speed. DOSBox cycle settings therefore influence animation rate, just as CPU performance influences many historical DOS effects.
-
-## Source audit
-
-`audit.py` catches structural mistakes without pretending to be an assembler. It verifies COM origin/mode declarations, VGA entry/framebuffer usage, text-mode restoration, and rejects accidental x86-64 low-byte register names. `build.sh` remains authoritative for actual NASM syntax and the final strict byte count.
+These catch structural regressions fast, but **they are not a substitute for an
+actual build-and-run pass** — see below for what a real assemble-and-run turned up
+that pure static/text-level checks could not.
 
 ## Files
 
 - `intro256.asm` — strict sizecoded intro source
-- `showcase.asm` — multi-effect demo source
-- `audit.py` — source-level sanity checks
-- `build.sh` — reproducible NASM build and byte-limit enforcement
-- `run-dosbox.sh` — DOSBox launcher
-- `DOSBOX.CONF` — example DOSBox configuration
+- `showcase.asm` — full showcase source (scenes, scroller, cube, music, palette)
+- `audit.py`, `audit_final.py`, `release_audit.py` — layered static source audits
+- `build.sh` — reproducible NASM build, audit run, and 256-byte gate enforcement
+- `run-dosbox.sh` — DOSBox launcher (showcase by default, `UBER256.COM` as `$1`)
+- `DOSBOX.CONF` — DOSBox configuration (vsync-correct `cycles=max`/`core=auto`)
+- `MANIFEST.sha256` — SHA-256 hashes of every source file
+- `TECHNICAL.md` — low-level implementation notes (COM loading, DAC, retrace, …)
+- `FINAL_REVIEW.md` — design/architecture review
+- `screenshot.jpg` — `UBERSHOW.COM` running live in DOSBox
 
-## Toolchain limitation of this packaged build
+## Known issues this audit found and fixed
 
-The environment used to originally package this source did not contain NASM or DOSBox, so the release shipped without ever having been assembled or run — see "Post-release audit fixes" above for what a real build-and-run pass turned up. NASM and DOSBox are now both available and used as part of this audit; `.COM` binaries are still not committed to the repo (build them locally with `./build.sh`), since they're reproducible build output, not source.
+This project was originally packaged in an environment with **no NASM or DOSBox
+available**, so it had never actually been assembled or run before this audit. A
+real build-and-run pass (installing both tools and testing live in DOSBox) found
+several bugs the static/text-grep audits could not catch on their own:
 
-## 3.0 closure pass
+- **`showcase.asm` didn't assemble at all**: `scene_tunnel` used `add al,si`, which
+  is illegal in 16-bit real mode (SI has no addressable low byte, unlike AX/BX/CX/
+  DX). Fixed by routing the value through BX.
+- **Memory corruption**: `scene_feedback` was missing its `jmp overlay`, so it fell
+  through into `scene_copper`'s renderer with `DI` already past the end of the
+  64,000-byte backbuffer — wrapping the segment offset and overrunning the
+  DOS-allocated block. Fixed, and `audit_final.py` now checks every scene for a
+  terminating jump so this can't pass silently again.
+- **`UBERSHOW.COM` could never actually run**: it always printed "not enough
+  conventional memory" and exited immediately, confirmed live in DOSBox. Root
+  cause and fix described above under "A DOS `.COM` memory-model gotcha".
+- **Esc was effectively non-functional**: direct 8042 port polling for the
+  keyboard raced the BIOS's own IRQ1 handler (which almost always won), with no
+  guard in `intro256.asm` at all and an incomplete one in `showcase.asm`. Fixed in
+  both by masking IRQ1 at the 8259 PIC for the program's duration.
+- **`build.sh`/`run-dosbox.sh` shipped without the executable bit**, so the
+  documented commands failed outright.
+- **The scroller/cube lost contrast** against the main per-scene animated palette
+  (both used plain DAC indices that the animation loop also wrote every frame, so
+  foreground/background could converge to similar tones). Fixed by reserving fixed
+  DAC entries, as described above.
+- **`run-dosbox.sh` silently ran at throttled speed**: combining `-conf` with
+  separate `-c` autoexec flags capped DOSBox at a low fixed cycle count instead of
+  `cycles=max`. Fixed by folding the autoexec into the conf file itself.
+- Several documentation inaccuracies (a mis-described memory-allocation size, a
+  stale pixel-store comment) were also corrected.
 
-The showcase is now deliberately different from the strict sizecoded entry. It allocates a 64,000-byte DOS conventional-memory backbuffer, renders complete frames off-screen, waits for VGA vertical retrace, and copies 32,000 words to A000h. It preserves/restores the caller video mode, frees allocated memory, checks the 8042 status register before consuming keyboard data, and shuts the PC speaker down on normal exit.
-
-Audio is a procedural PIT channel-2 / PC-speaker arpeggio, requiring no sample or music asset. The visual timeline contains four independently generated scenes plus animated DAC palette cycling and a moving raster overlay. ESC exits cleanly.
-
-`UBER256.COM` remains intentionally tiny and direct-to-VRAM. `UBERSHOW.COM` is the robust production target.
-
-## Version 4.0 effect expansion
-
-`showcase.asm` now contains eight procedural scenes: interference plasma, radial tunnel,
-x/y XOR field, concentric moire, zooming checker grid, dual-source ripples, vertical
-twister ribbons, and a cellular/feedback-style field. Three independently moving raster
-bars and scene-aware palette morphing run over the entire timeline.
-
-Scene length is 512 VGA frames (roughly 7.3 seconds on a normal 70 Hz Mode 13h display),
-which prevents the previous rapid hard-cut feel. All animation derives from one 16-bit
-frame counter, so motion, palette, overlays, and PC-speaker sequencing remain phase locked.
-The presentation path still uses a 64,000-byte off-screen buffer and a retrace-synchronized
-word copy to A000h.
-
-
-## 5.0 polish pass
-
-- Corrected DAC palette indexing to an exact 0..255 cycle.
-- Added 32-frame palette-domain fade-in/fade-out around every scene boundary.
-- Kept one global frame clock for visual motion, palette motion and speaker sequencing.
-- Clarified that retrace-start pacing reduces tearing but a 64 KB software blit is not guaranteed to complete inside VGA vertical blank on original hardware.
-- Expanded static release checks for scene presence, exact 64,000-byte blit structure, transition envelope and guarded keyboard reads.
-
-
-## FINAL scene expansion
-
-UBERSHOW now contains 16 timed procedural scenes. The added half emphasizes inexpensive integer recurrences (copper waves, Manhattan diamonds, lattice, warp bands, scanwave, bitplane interference, vortex mixer and a combined finale) so visual variety increases without making every frame multiply-heavy. Scene fades remain palette-domain operations and the global frame counter never resets.
-
-## 5.0 presentation pass
-
-The showcase now has a scene-progress marker and a symmetric shutter transition layered with the existing DAC fade. The marker costs only a few hundred stores per frame. Transition geometry is rendered into the existing backbuffer before presentation, so there is no second framebuffer and no BIOS drawing in graphics mode. The PC-speaker sequence also changes pitch range with the current scene while retaining the same deterministic frame clock.
-
-
-## Post-release audit fixes
-
-This build was never actually assembled before packaging (NASM/DOSBox were absent from
-the packaging environment, as noted below). A real build turned up issues the static
-text-grep audits (`audit.py`, `audit_final.py`, `release_audit.py`) could not catch:
-
-- `showcase.asm` **did not assemble**: `scene_tunnel` used `add al,si`, which is illegal
-  in 16-bit real mode (SI has no addressable low byte, unlike AX/BX/CX/DX). Fixed by
-  routing the value through `BX` (`mov bx,si` / `add al,bl`).
-- `scene_feedback` was missing its `jmp overlay`, so execution fell through into
-  `scene_copper`'s renderer with `DI` already at the end of the 64,000-byte backbuffer.
-  The second 64,000-byte render wrapped `DI` past the end of the real-mode segment and
-  overran the DOS-allocated block, corrupting adjacent memory. Fixed by adding the
-  missing jump, and `audit_final.py` now checks every scene for a terminating
-  `jmp overlay` so this class of bug can't pass silently again.
-- Esc-key handling raced the BIOS's own IRQ1 handler: with interrupts enabled and no
-  masking, the BIOS ISR almost always drained the keyboard controller before the
-  demo's own `in al,64h`/`in al,60h` poll saw it, making ESC unreliable. Fixed by
-  masking IRQ1 at the 8259 PIC for the demo's duration and restoring the original
-  mask on exit.
-- `build.sh` and `run-dosbox.sh` shipped without the executable bit, so the documented
-  `./build.sh` / `./run-dosbox.sh` commands failed outright. Fixed with `chmod +x`.
-- `FINAL_REVIEW.md` mis-described the backbuffer allocation as "4000h paragraphs
-  (64 KiB)"; the source actually requests decimal 4000 paragraphs, which is exactly
-  64,000 bytes (not 65,536). Corrected.
-- `intro256.asm` had the same unguarded-keyboard-poll issue as `showcase.asm` above:
-  `in al,60h` with no 8042 status check and no IRQ1 masking, so the BIOS's own IRQ1
-  handler would almost always drain the scancode first, making Esc effectively
-  non-functional. Fixed the same way (status-register guard plus IRQ1 masking around
-  the loop, restored on exit) at a cost of 16 bytes — `UBER256.COM` is now 70 bytes,
-  still well inside the 256-byte budget.
-- A stale comment in `scene_marker` undercounted its own per-frame pixel stores
-  (claimed 384, actually 16 blocks * 8x8 = 1024). Corrected for accuracy; no
-  behavioral change.
-- **`UBERSHOW.COM` could never actually run.** Confirmed by installing DOSBox and
-  running the real binary: it always printed `UBERSHOW: not enough conventional
-  memory.` and exited immediately. A DOS `.COM` program owns *all* free conventional
-  memory at launch (its PSP block spans to the top of the DOS arena), so the
-  64,000-byte `AH=48h` backbuffer allocation always found nothing free to give out —
-  the program had never been run end to end before this audit. Fixed by shrinking
-  the program's own memory block with `AH=4Ah` (SETBLOCK) immediately at `start`,
-  switching onto a small local stack inside the kept block, and only then performing
-  the backbuffer allocation. Verified live in DOSBox: the showcase now renders,
-  animates, cycles scenes and palettes, and exits cleanly on Esc.
-
-All three audit scripts and a full `./build.sh` now pass with NASM producing a 70-byte
-`UBER256.COM` and a working `UBERSHOW.COM`, and both were run live in DOSBox to confirm
-they render correctly and exit cleanly on Esc.
-
-## Final release architecture
-
-The final tree is intentionally split between a strict <=256-byte intro and the full 16-scene showcase. The showcase is a software-backbuffered Mode 13h production, not a hardware page-flipped engine. See `FINAL_REVIEW.md` for the final design, art-direction, timing and validation review.
+All three audit scripts and a full `./build.sh` pass; both `.COM` files have been
+built with real NASM and run live in DOSBox, confirmed rendering, animating, and
+exiting cleanly on Esc.
