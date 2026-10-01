@@ -276,3 +276,14 @@ exiting cleanly on Esc.
   launching with `-conf` alone (confirmed live: title bar reads "max 100%
   cycles"). It also didn't fall back to the Homebrew cask's `.app` bundle when
   `dosbox` wasn't on `PATH` — fixed.
+- **`draw_line` had a real infinite-loop bug**, found by forcing `scene_cube`
+  active and watching it live in DOSBox: the cube rendered one wrong, static
+  frame (with a stray out-of-bounds edge) and never animated again, because
+  `main:`/`present:` never got back around to `inc bp`. Root cause: the
+  Bresenham step must compute `e2 = 2*err` **once** and reuse it for both the
+  x-step and y-step conditions; this instead recomputed `e2` from `[line_err]`
+  a second time, after the x-step may have already mutated it, which could
+  stop the walk from ever landing exactly on the target pixel — the only
+  condition the loop checks to terminate. Fixed by computing `e2` once into a
+  register and reusing it for both comparisons. Confirmed live in DOSBox: the
+  cube now rotates continuously and the starfield animates correctly.

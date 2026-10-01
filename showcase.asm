@@ -1214,26 +1214,59 @@ cube_rotate_project:
     mov [cube_rz2],bx                ; y*sinX + z*cosX (final depth)
 
     ; True perspective projection (not orthographic): divide by distance
-    ; from the eye, so edges nearer the viewer project larger. cube_rz2 is
-    ; bounded to roughly +-70 by the rotation (it can't exceed the original
-    ; vertex's vector length), and CUBE_EYE_DIST=160 keeps the denominator
-    ; comfortably positive (90..230) for every vertex -- never zero.
+    ; from the eye, so edges nearer the viewer project larger. cube_rz2
+    ; SHOULD stay within roughly +-70 (it can't exceed the original
+    ; vertex's vector length under exact rotation), but this is fixed-point
+    ; integer math, not exact matrix rotation -- clamp the divisor to a
+    ; safe minimum regardless, so IDIV can never be handed a near-zero (or
+    ; negative) denominator. A too-small divisor here was observed to blow
+    ; up the projected coordinate into a huge value, which produced a
+    ; degenerate line draw_line could take a very long time to walk.
     mov ax,[cube_rz2]
     add ax,CUBE_EYE_DIST
+    cmp ax,40
+    jge .depth_ok
+    mov ax,40
+.depth_ok:
     mov [cube_depth],ax
     mov ax,[cube_rx]
     imul ax,CUBE_PROJ_SCALE
     cwd
     idiv word [cube_depth]
     add ax,160
+    call .clamp_sx
     mov [cube_sx],ax
     mov ax,[cube_ry2]
     imul ax,CUBE_PROJ_SCALE
     cwd
     idiv word [cube_depth]
     add ax,100
+    call .clamp_sy
     mov [cube_sy],ax
     popa
+    ret
+    ; Defensive belt-and-suspenders clamp: even with the depth clamp above,
+    ; keep the final screen coordinate within a generous but bounded range
+    ; so draw_line's Bresenham walk can never be handed an extreme endpoint.
+.clamp_sx:
+    cmp ax,-2000
+    jge .csx_lo_ok
+    mov ax,-2000
+.csx_lo_ok:
+    cmp ax,2320
+    jle .csx_hi_ok
+    mov ax,2320
+.csx_hi_ok:
+    ret
+.clamp_sy:
+    cmp ax,-2000
+    jge .csy_lo_ok
+    mov ax,-2000
+.csy_lo_ok:
+    cmp ax,2200
+    jle .csy_hi_ok
+    mov ax,2200
+.csy_hi_ok:
     ret
 
 ; General-purpose Bresenham line draw between (line_x0,line_y0) and
@@ -1296,9 +1329,17 @@ draw_line:
     jne .step
     jmp .done
 .step:
+    ; e2 must be computed ONCE from err and reused for BOTH the x-step and
+    ; y-step conditions (the standard Zingl dx+dy algorithm). This used to
+    ; recompute e2 from [line_err] a second time for the y-step check --
+    ; after the x-step above may have already mutated line_err -- which
+    ; could stop the walk from ever landing exactly on (x1,y1), the only
+    ; condition .loop checks to terminate: a genuine infinite loop. bx
+    ; holds e2 here and is never touched by the x-step block below, so it
+    ; stays correct for the y-step's comparison too.
     mov ax,[line_err]
     mov bx,ax
-    shl bx,1
+    shl bx,1                       ; bx = e2 = 2*err, computed once
     cmp bx,[line_dy]
     jl .skipx
     mov ax,[line_err]
@@ -1308,9 +1349,7 @@ draw_line:
     add ax,[line_sx]
     mov [line_cx],ax
 .skipx:
-    mov bx,[line_err]
-    shl bx,1
-    cmp bx,[line_dx]
+    cmp bx,[line_dx]               ; reuse the SAME e2 computed above
     jg .skipy
     mov ax,[line_err]
     add ax,[line_dx]
