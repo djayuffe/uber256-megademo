@@ -81,7 +81,7 @@ This is intentionally not a modern SDL program disguised as DOS. Rendering is 16
 
 ## Toolchain limitation of this packaged build
 
-The environment used to package this source did not contain NASM or DOSBox. Consequently no fabricated `.COM` binaries are included. `audit.py` was executed successfully, while final opcode encoding, exact byte count and runtime behaviour must be established by `build.sh` with NASM and by DOSBox/real hardware respectively.
+The environment used to originally package this source did not contain NASM or DOSBox, so the release shipped without ever having been assembled or run — see "Post-release audit fixes" above for what a real build-and-run pass turned up. NASM and DOSBox are now both available and used as part of this audit; `.COM` binaries are still not committed to the repo (build them locally with `./build.sh`), since they're reproducible build output, not source.
 
 ## 3.0 closure pass
 
@@ -157,9 +157,20 @@ text-grep audits (`audit.py`, `audit_final.py`, `release_audit.py`) could not ca
 - A stale comment in `scene_marker` undercounted its own per-frame pixel stores
   (claimed 384, actually 16 blocks * 8x8 = 1024). Corrected for accuracy; no
   behavioral change.
+- **`UBERSHOW.COM` could never actually run.** Confirmed by installing DOSBox and
+  running the real binary: it always printed `UBERSHOW: not enough conventional
+  memory.` and exited immediately. A DOS `.COM` program owns *all* free conventional
+  memory at launch (its PSP block spans to the top of the DOS arena), so the
+  64,000-byte `AH=48h` backbuffer allocation always found nothing free to give out —
+  the program had never been run end to end before this audit. Fixed by shrinking
+  the program's own memory block with `AH=4Ah` (SETBLOCK) immediately at `start`,
+  switching onto a small local stack inside the kept block, and only then performing
+  the backbuffer allocation. Verified live in DOSBox: the showcase now renders,
+  animates, cycles scenes and palettes, and exits cleanly on Esc.
 
 All three audit scripts and a full `./build.sh` now pass with NASM producing a 70-byte
-`UBER256.COM` and a working `UBERSHOW.COM`.
+`UBER256.COM` and a working `UBERSHOW.COM`, and both were run live in DOSBox to confirm
+they render correctly and exit cleanly on Esc.
 
 ## Final release architecture
 

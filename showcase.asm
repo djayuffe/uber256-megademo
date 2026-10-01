@@ -7,6 +7,20 @@ ORG 100h
 %define SCENE_MASK  15            ; 16 primary scenes
 
 start:
+    ; A .COM program owns ALL free conventional memory at launch (its PSP
+    ; block spans to the top of the DOS arena). Without shrinking that block
+    ; first, the later 64,000-byte AH=48h allocation below always fails with
+    ; "insufficient memory", since DOS has nothing left to give out.
+    mov ax,cs
+    mov es,ax
+    mov bx,256                    ; 256 paragraphs = 4096 bytes: comfortably
+    mov ah,4Ah                    ; covers code+data+stack (~1.8 KiB) with
+    int 21h                       ; room to spare. SETBLOCK shrinks our own
+                                   ; memory block so the AH=48h call below has
+                                   ; free conventional memory to allocate from.
+    mov ax,cs
+    mov ss,ax
+    mov sp,stack_top              ; switch onto our own stack inside that block
     push cs
     pop ds
     mov ah,0Fh
@@ -806,3 +820,7 @@ backseg dw 0
 pal_limit db 63
 pic_mask db 0
 msg_nomem db 'UBERSHOW: not enough conventional memory.$'
+
+align 16
+stack_bottom: times 256 db 0      ; our own small stack, kept by the SETBLOCK
+stack_top:

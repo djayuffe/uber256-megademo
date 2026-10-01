@@ -90,7 +90,12 @@ on every original PC. The release therefore does not claim universal tear-free o
 
 ## Validation boundary
 
-Static source and package audits can be executed in the current environment. NASM and
-DOSBox are not installed here, so no claim is made that the final COM binaries were
-assembled or executed in this environment. `build.sh` is the authoritative binary-size
-gate when NASM is available.
+NASM and DOSBox are now installed and have been used directly: both `.COM` files
+assemble cleanly via `build.sh`, and both were launched in real DOSBox and watched
+render, animate and exit cleanly on Esc. This is what actually caught the two bugs
+that the static source/package audits could not see — an illegal opcode that kept
+`showcase.asm` from assembling at all, and a missing own-memory-block shrink that
+kept `UBERSHOW.COM` from ever getting past "not enough conventional memory" even
+once it did assemble. Static audits remain useful as a fast regression gate, but
+they are not a substitute for an actual build-and-run pass, which should be repeated
+whenever `showcase.asm` or `intro256.asm` change.
