@@ -19,16 +19,21 @@ ORG 100h
 
 start:
     ; A .COM program owns ALL free conventional memory at launch (its PSP
-    ; block spans to the top of the DOS arena). Without shrinking that block
-    ; first, the later 64,000-byte AH=48h allocation below always fails with
-    ; "insufficient memory", since DOS has nothing left to give out.
+    ; block spans to the top of the DOS arena). Shrinking that block to a
+    ; small private one stops the program from squatting on the whole arena
+    ; and keeps the font/scroller/cube tables and the local stack out of
+    ; reach of anything DOS later hands out. (The original reason for the
+    ; shrink was a 64,000-byte AH=48h backbuffer allocation, which no longer
+    ; exists: the page-flip rewrite renders straight into VGA memory, so
+    ; nothing is allocated from DOS at all.)
     mov ax,cs
     mov es,ax
     mov bx,512                    ; 512 paragraphs = 8192 bytes: comfortably
     mov ah,4Ah                    ; covers code+data+stack (font, scroller,
-    int 21h                       ; cube tables) with room to spare. SETBLOCK
-                                   ; shrinks our own memory block so the AH=48h
-                                   ; call below has free memory to allocate from.
+    int 21h                       ; cube tables) with room to spare. This must
+                                   ; stay larger than the .COM image itself
+                                   ; (~4 KB), or code past the end of the block
+                                   ; would sit outside the memory we own.
     mov ax,cs
     mov ss,ax
     mov sp,stack_top              ; switch onto our own stack inside that block
@@ -73,18 +78,16 @@ main:
 .haveseg:
     mov es,ax
     xor di,di
-    ; Scene index = (frame >> SCENE_SHIFT) mod SCENE_COUNT. SCENE_COUNT is not
-    ; a power of two (17 scenes), so this uses DIV instead of an AND mask;
-    ; the remainder (DL) is cached in cur_scene so scene_marker and
-    ; music_tick read the same value instead of recomputing it separately.
-    mov ax,bp
-    mov cl,SCENE_SHIFT
-    shr ax,cl
-    xor dx,dx
-    mov bx,SCENE_COUNT
-    div bx
-    mov [cur_scene],dl
-    mov al,dl
+    ; cur_scene is a 0..17 counter, advanced once per frame in present: and
+    ; wrapped at SCENE_COUNT, so all 18 scenes play in order and the sequence
+    ; loops exactly. It used to be recomputed here as (frame >> SCENE_SHIFT)
+    ; mod SCENE_COUNT, but the frame clock is 16-bit: it only yields 128
+    ; groups of 512 frames, and 128 mod 18 isn't 0, so every wrap replayed
+    ; scenes 0 and 1 and the intended 18-scene cycle never recurred. One
+    ; shared counter also means scene_marker and music_tick can never disagree
+    ; about the show's position; both are advanced by a single inc in
+    ; present:, before music_tick steps the sequencer.
+    mov al,[cur_scene]
     cmp al,0
     je scene_plasma
     cmp al,1
@@ -515,9 +518,9 @@ scene_vortex:
     jmp overlay
 
 ; 16: rotating wireframe cube. The only non-full-screen-field scene: it
-; clears the backbuffer to a flat colour first, then projects and draws a
-; true 3D object (two-axis rotation, orthographic projection, Bresenham
-; line draw) instead of a per-pixel procedural texture.
+; clears the page to a flat colour first, then projects and draws a true 3D
+; object (two-axis rotation, true perspective projection with a depth divide,
+; Bresenham line draw) instead of a per-pixel procedural texture.
 scene_cube:
     mov ax,CUBE_BG
     mov ah,al
@@ -603,18 +606,21 @@ scene_starfield:
 .st_loop:
     mov ax,bp
     mov cx,3
-    mul cx                         ; ax = (frame*3) mod 65536 -- truncation
-                                    ; just means one harmless seam every
-                                    ; 65536 frames (~15 min), never visible
+    mul cx                         ; ax = (frame*3) mod 65536
     mov cx,[star_idx]
     imul cx,37                     ; stagger each star's phase
     add ax,cx
     xor dx,dx
     mov cx,240
-    div cx                         ; dx = phase 0..239
-    mov ax,255
-    sub ax,dx                      ; ax = Z: 255 (far) down to 16 (near),
-    mov [star_z],ax                ; wraps back to far when phase resets
+    div cx                         ; dx = 0..273: the 16-bit phase accumulator
+    cmp dx,240                     ; is not a multiple of the 240-frame period,
+    jb .phase_ok                   ; so the quotient can overshoot one period
+    sub dx,240                     ; (273 < 2*240, so one subtract always
+.phase_ok:                         ; suffices). Skipping this ran the phase past
+    mov ax,255                     ; 239, driving Z negative and then to zero,
+    sub ax,dx                      ; where the two IDIVs below faulted with #DE.
+    mov [star_z],ax                ; ax = Z: 255 (far) down to 16 (near),
+                                    ; wrapping back to far as the phase resets
 
     mov ax,[star_base_x+si]
     mov cx,STAR_SCALE
@@ -749,6 +755,11 @@ present:
     mov al,bl
     out dx,al
     inc bp
+    inc byte [cur_scene]            ; next scene, wrapping at SCENE_COUNT
+    cmp byte [cur_scene],SCENE_COUNT
+    jb .scene_ok
+    mov byte [cur_scene],0
+.scene_ok:
     call music_tick
     call key_escape
     jnc main
@@ -763,7 +774,7 @@ exit:
     mov ax,4C00h
     int 21h
 
-; AX = y. ES still points at backbuffer here. Draws a soft 3-scanline glow
+; AX = y. ES points at the page being rendered into. Draws a soft 3-scanline glow
 ; (dim/bright/dim) instead of one flat line, a classic fatter raster bar.
 raster_line:
     cmp ax,199
@@ -811,7 +822,7 @@ raster_line:
 
 
 ; Scene identity strip: SCENE_COUNT small blocks at the top, current scene
-; highlighted. Deliberately tiny: 17 blocks * 8x8 pixels ~= 1088 stores/frame.
+; highlighted. Deliberately tiny: 18 blocks * 8x8 pixels ~= 1152 stores/frame.
 scene_marker:
     push ax
     push bx
@@ -866,7 +877,7 @@ transition_wipe:
     sub bx,ax
     mov ax,bx
 .tw_have:
-    ; AX=0..15. Convert to number of covered scanlines, 96..6.
+    ; AX=0..15. Convert to number of covered scanlines, 100..55.
     mov bx,ax
     shl ax,1
     add ax,bx
@@ -1153,7 +1164,8 @@ scroll_draw:
 ; Rotate one 3D point (cube_px,cube_py,cube_pz) by cube_angle_y (around the
 ; Y axis) then cube_angle_x (around the X axis), using the shared sintab
 ; (cos(a) = sin((a+64)&255), a quarter-turn ahead in the same table), then
-; project it orthographically to screen space in (cube_sx,cube_sy).
+; perspective-project it (divide by depth + CUBE_EYE_DIST) to screen space in
+; (cube_sx,cube_sy).
 cube_rotate_project:
     pusha
     mov bx,[cube_angle_y]
@@ -1271,7 +1283,7 @@ cube_rotate_project:
 
 ; General-purpose Bresenham line draw between (line_x0,line_y0) and
 ; (line_x1,line_y1) in line_color, with per-pixel bounds checks so an
-; out-of-range projected point can never write outside the backbuffer.
+; out-of-range projected point can never write outside the active VGA page.
 draw_line:
     pusha
     mov ax,[line_x1]
