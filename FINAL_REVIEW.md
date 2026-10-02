@@ -115,12 +115,14 @@ once it did assemble. Static audits remain useful as a fast regression gate, but
 they are not a substitute for an actual build-and-run pass, which should be repeated
 whenever `showcase.asm` or `intro256.asm` change.
 
-The 6.1 fixes below were derived from static analysis plus simulation of the exact
-16-bit arithmetic, and re-verified by assembling and checking the emitted
-instructions; they have **not** yet been confirmed in a running DOSBox. A
-headless run of at least 20 minutes of frames would be needed to exercise the
-former crash point, and short of that the starfield and scene-cycling behaviour
-should be watched once by eye.
+The 6.1 items below were settled by executing instrumented builds under DOSBox rather
+than by reading the source: each build writes its per-frame scene index and computed
+star divisor to a host file, which is then compared against expectations. A
+headless DOSBox run (`SDL_VIDEODRIVER=dummy`) makes this reproducible without a
+window. Those runs also have **not** been confirmed as pixel-accurate VGA output — no
+framebuffer capture is possible in the current environment (screen-recording
+permission and keystroke injection are both denied), so the visual result still wants
+one look by eye.
 
 ## 6.0 expansion: scene 16 (3D), text scroller, music, raster glow
 
@@ -157,28 +159,39 @@ is now load-bearing rather than cosmetic: nothing is allocated from DOS any more
 but if the image ever exceeded 8 KiB the shrink would leave code outside the
 program's own block. `build.sh` prints the size on every build for that reason.
 
-## 6.1 audit: arithmetic-range and sequencing bugs
+## 6.1 audit: one real bug, one phantom bug, and one regression
 
-A later audit pass, working from the assembled output rather than the source text,
-found two defects that every existing check had passed:
+An audit pass claimed two defects in `UBERSHOW.COM`. Instrumented runs under DOSBox
+(one instrumented build per claim, logging the scene index and the computed star
+divisor to a host file) split them apart:
 
-- **`scene_starfield` divided by zero.** The 16-bit phase accumulator is not a
-  multiple of its 240-frame period, so `div 240` returns up to 273, driving the
-  star's Z to negative and then exactly zero — and `IDIV word [star_z]` faults
-  with `#DE` (no handler installed, so the program dies). 291 frames per 65536-frame
-  cycle contained a zero divisor; the first was frame 63709, 221 frames into a
-  starfield scene. Fixed by reducing the quotient back into 0..239 with a compare
-  and one conditional subtract, restoring the documented 16..255 depth ramp.
-- **The 18-scene sequence never recurred.** Scene index was computed as
-  `(frame >> 9) mod 18`, but the frame clock is 16-bit: only 128 groups exist, and
-  `128 mod 18 != 0`, so every wrap replayed scenes 0 and 1. Fixed with an explicit
-  0..17 counter wrapped in `present:`, which also removes a divide from the hot
-  path and lets `scene_marker`/`music_tick` share one unambiguous value.
+- **The 18-scene sequence did not loop cleanly.** The scene index was
+  `(frame >> 9) mod 18`, and the frame clock is 16-bit, so one clock cycle is only
+  128 groups of 512 frames. `128 mod 18` is 2, not 0: at every wrap the show replayed
+  scenes 0 and 1 instead of continuing the cycle. Replaced with an explicit 0..17
+  counter advanced in `present:` and wrapped at `SCENE_COUNT`. Verified by running
+  both revisions across the clock wrap: the old index jumped backwards from 1 to 0,
+  the new one continues 16 to 17.
+- **The claimed `#DE` crash in `scene_starfield` was not real.** The argument was that
+  `div 240` yields up to 273, so `Z = 255 - dx` goes negative and then hits zero and
+  `IDIV word [star_z]` faults some 15 minutes in. That misreads the instruction:
+  `DIV r/m16` returns the **quotient in AX** and the **remainder in DX**, DX is zeroed
+  first, and the code consumes DX. A remainder is 0..239 by construction, so Z is
+  16..255 always. Running the pre-"fix" code for 1024 starfield frames with the phase
+  accumulator swept through its whole range recorded a minimum Z of 16, zero zero
+  divisors and zero negative values. The clamp that was added in the name of this fix
+  was unreachable (`dx` can never reach 240) and has been removed; the comment now
+  spells out the quotient/remainder split, since reading it the other way is exactly
+  the mistake that produced the phantom.
+- **The counter fix regressed the pacing on its first attempt.** Incrementing
+  `cur_scene` every frame rather than every 512 frames strobed all 18 scenes 70 times
+  a second; the instrumented log showed the index cycling 16,17,0,1,… on every single
+  frame. The advance is now gated on `bp mod 512 == 0`, so scene length still tracks
+  `SCENE_SHIFT`. All three static audits passed throughout, because every check they
+  make is textual and none of them reason about how often a counter is advanced.
 
-Both were invisible to a short interactive run, which is the point worth
-recording: the first needs roughly 15 minutes of frames to reach, the second half
-that again. Neither is a matter of style, and neither was caught by the static
-audits, all of which are textual. `TECHNICAL.md` now documents the 16-bit
-divisor-range hazard and the sequencing decision, and this section supersedes the
-earlier claims in this file that the demo was software-blitted from a DOS
-allocation.
+The general lesson is the one worth keeping: the three audits in this directory are
+source-text pattern matches, so a change that compiles cleanly, keeps the image size
+plausible and matches every `needle` in `audit.py` can still be badly wrong at
+runtime. Assertions about behaviour — "this sequence recurs", "this divisor is never
+zero" — need to be executed, not grepped.

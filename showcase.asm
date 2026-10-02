@@ -612,14 +612,20 @@ scene_starfield:
     add ax,cx
     xor dx,dx
     mov cx,240
-    div cx                         ; dx = 0..273: the 16-bit phase accumulator
-    cmp dx,240                     ; is not a multiple of the 240-frame period,
-    jb .phase_ok                   ; so the quotient can overshoot one period
-    sub dx,240                     ; (273 < 2*240, so one subtract always
-.phase_ok:                         ; suffices). Skipping this ran the phase past
-    mov ax,255                     ; 239, driving Z negative and then to zero,
-    sub ax,dx                      ; where the two IDIVs below faulted with #DE.
-    mov [star_z],ax                ; ax = Z: 255 (far) down to 16 (near),
+    div cx                         ; DIV divides DX:AX by 240: the quotient
+                                    ; lands in AX (0..273, discarded) and the
+                                    ; REMAINDER in DX. DX was zeroed above, so
+                                    ; this is really AX / 240 and DX is the
+                                    ; phase mod 240 -- which is what guarantees
+                                    ; it is 0..239 no matter how far the phase
+                                    ; has run. It is DX, not AX, that Z is
+                                    ; derived from.
+    mov ax,255
+    sub ax,dx                      ; ax = Z: 255 (far) down to 16 (near),
+    mov [star_z],ax                ; wrapping back to far as the phase resets.
+                                    ; Since DX is a remainder, Z is 16..255 by
+                                    ; construction: never 0, never negative,
+                                    ; so the two IDIVs below cannot fault.
                                     ; wrapping back to far as the phase resets
 
     mov ax,[star_base_x+si]
@@ -755,7 +761,17 @@ present:
     mov al,bl
     out dx,al
     inc bp
-    inc byte [cur_scene]            ; next scene, wrapping at SCENE_COUNT
+    ; Advance to the next scene once every 2^SCENE_SHIFT frames (512, ~7.3 s),
+    ; so the advance is gated on the frame clock. Incrementing this every
+    ; frame instead strobes through all 18 scenes 70 times a second; the gate
+    ; is what the old (frame >> SCENE_SHIFT) expression was really doing.
+    ; The counter itself is a plain 0..17 wrap rather than a modulo of the
+    ; frame count, so the 18-scene cycle still recurs across the 16-bit
+    ; wrap of bp (128 groups per cycle, and 128 mod 18 isn't 0).
+    mov ax,bp
+    and ax,(1 << SCENE_SHIFT) - 1
+    jnz .scene_ok
+    inc byte [cur_scene]
     cmp byte [cur_scene],SCENE_COUNT
     jb .scene_ok
     mov byte [cur_scene],0

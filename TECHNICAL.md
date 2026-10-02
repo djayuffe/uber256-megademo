@@ -127,20 +127,25 @@ which is the only condition the loop tests to terminate.
 ## Starfield depth (scene_starfield)
 
 Each of the 32 stars derives a Z depth every frame from `(frame*3 + index*37)`
-divided by 240, giving a phase of 0..239 and therefore `Z = 255 - phase` — a true
-16..255 ramp from near to far, recycling on its own with no per-star state. The
-divisor and dividend are both 16-bit, and the frame-derived term reaches 65535, so
-the quotient can actually reach 273: the accumulator is not a multiple of the
-240-frame period, and 65535/240 = 273. The code therefore reduces the quotient
-back into 0..239 with a compare and one conditional subtract (273 < 2*240, so one
-pass always suffices).
+taken modulo 240, giving a phase of 0..239 and therefore `Z = 255 - phase` — a true
+16..255 ramp from near to far, recycling on its own with no per-star state.
 
-This clamp is not cosmetic. Left out, the phase runs past 239, Z goes negative and
-then reaches exactly zero, and the two `IDIV word [star_z]` projection divides
-fault with `#DE` — no handler is installed, so the program dies. 291 frames per
-65536-frame cycle contained a zero divisor; the first is frame 63709, i.e. 221
-frames into a starfield scene. Note the same `IDIV`-by-unclamped-divisor hazard
-that `cube_rotate_project` guards against by clamping depth to at least 40.
+The register allocation is what makes that bound airtight, and it reads like a bug at
+first glance. `DIV r/m16` divides `DX:AX` and returns the **quotient in AX** and the
+**remainder in DX**. The code zeroes DX immediately beforehand, so the divide is a
+plain 16-bit `AX / 240`: the quotient really does reach 273 (`65535/240`, because the
+16-bit accumulator is not a multiple of the period), but it lands in AX and is
+discarded. What the code consumes is DX, the remainder, which is 0..239 by
+construction. `Z = 255 - DX` is therefore 16..255 always, so the two
+`IDIV word [star_z]` projections can never see a zero divisor.
+
+This is worth stating explicitly because an earlier revision of this document claimed
+the opposite: reading DX as the quotient instead of the remainder implies a Z ramp that
+runs negative and then hits exactly zero, faulting with `#DE` roughly 15 minutes in.
+That reading is wrong, and the claim has been removed rather than papered over — see
+FINAL_REVIEW.md section 6.1. The genuine `IDIV`-by-unclamped-divisor hazard in this
+program is the one `cube_rotate_project` guards against by clamping depth to at least
+40.
 
 ## Reserved DAC indices
 
