@@ -1,5 +1,7 @@
 # UBER256 / UBERSHOW — a zero-asset DOS VGA demoscene project
 
+> **This is the earlier line of the project.** The show continued as [uber40k-dos-demo](https://github.com/djayuffe/uber40k-dos-demo) (20 scenes, about 11 KB, with OPL2 music), and the tiny intros live in their own repositories, indexed at [uber-tiny-demos](https://github.com/djayuffe/uber-tiny-demos). This repository is kept as it was: the sizes below (a 70-byte intro and a 3.9 KB show) describe the programs built from this source.
+
 ![UBERSHOW running in DOSBox](screenshot.jpg)
 
 Two flat real-mode DOS `.COM` programs, hand-written in NASM assembly, that run on
